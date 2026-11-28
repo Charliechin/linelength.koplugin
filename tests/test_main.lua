@@ -1482,6 +1482,21 @@ local function tests_sample()
     expect("the automatic tune reads the margins from the reader", tuned_with and tuned_with.margin_min, 20)
     expect("the automatic tune reads the margins from the reader", tuned_with and tuned_with.margin_max, 26)
 
+    -- The automatic tune is the manual one: it says what it did, so the reader who opens a book knows
+    -- the margins moved. The message comes from tuneNow, which the automatic path now calls.
+    local said = {}
+    auto_plugin.autoTune = function() return { steps = 1, chars = 58, changed = true, margin = 22 } end
+    auto_plugin.tuneNow = function()
+        said[#said + 1] = "tuneNow"
+        return LineLength.tuneNow(auto_plugin)
+    end
+    shown = {}
+    G_reader_settings.data = { linelength_auto_tune = true }
+    auto_plugin:onReaderReady()
+    expect("the automatic tune goes through the manual action", #said, 1)
+    expect("and the reader is told what happened", shown[#shown] and shown[#shown].text,
+        "Tuned to 58 characters.")
+
     -- It runs when the book is opened at its start, and nowhere else: a book picked up where it was
     -- left keeps the layout the reader is reading it with.
     local gate_doc = fakeDoc({ L1, L2, L3 })

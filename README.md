@@ -89,8 +89,10 @@ none at the start, six from the middle, none at the end. They live in the plugin
 settings.
 
 The margins are saved with the book, the way KOReader saves the margins a reader sets by hand, and
-the book is tuned every time it is opened at its first page. A book that is already within the band
-keeps the margins it has.
+the book is tuned every time it is opened at its first page. The automatic tune is the *Line length:
+tune this book* action, run at the moment the book opens: it measures the pages, moves the margins if
+the lines are outside the band, and says what it did, the way it does when the reader asks for it. A
+book that is already within the band keeps the margins it has, and says so.
 
 ## What the ranges are
 

@@ -335,7 +335,7 @@ function LineLength:onReaderReady()
     end
     -- ReaderRolling schedules its partial rerendering a tick after it is ready, not before. Measuring
     -- here would make every margin change a full re-render on the UI thread at book open, so the tune
-    -- waits for the reader's own tick; no message is shown, the automatic path is meant to be quiet.
+    -- waits for the reader's own tick.
     UIManager:tickAfterNext(function()
         -- Only when the book is opened at its start: a book picked up where it was left keeps its
         -- layout. The page is asked for here rather than before the tick, so that it holds where the
@@ -345,19 +345,9 @@ function LineLength:onReaderReady()
         if (ok_page and tonumber(page)) ~= 1 then
             return
         end
-        local ok_tune, result = pcall(function() return (self:autoTune(settings)) end)
-        if not ok_tune then
-            logger.warn("linelength: the auto-tune failed:", result)
-            return
-        end
-        -- A book that could not be measured has no count: the tune gives up on it and the book keeps
-        -- the layout it has.
-        if not result or result.chars == nil then
-            return
-        end
-        if result.changed then
-            logger.info("linelength: auto-tuned to", result.chars, "characters in", result.steps, "steps")
-        end
+        -- The automatic tune is the manual one, run for the reader: it says what it did, so a reader
+        -- opening a book knows the margins were moved and why.
+        self:tuneNow()
     end)
 end
 
