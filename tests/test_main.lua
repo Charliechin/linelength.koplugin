@@ -72,9 +72,9 @@ package.preload["device"] = function()
         end,
     } }
 end
--- KOReader's Event: a name and its arguments
+-- KOReader's Event: a name, the handler it dispatches to ("on" .. name) and the arguments
 package.preload["ui/event"] = function()
-    return { new = function(_self, name, ...) return { name = name, args = { ... } } end }
+    return { new = function(_self, name, ...) return { name = name, handler = "on" .. name, args = { ... } } end }
 end
 package.preload["dispatcher"] = function()
     return { registerAction = function(_self, name, def) actions[name] = def end }
@@ -347,9 +347,16 @@ local items = {}
 plugin:addToMainMenu(items)
 expect("menu item text", items.linelength_page and items.linelength_page.text, "Line length: this page")
 expect("menu item goes in the Typeset menu", items.linelength_page and items.linelength_page.sorting_hint, "typeset")
+expect("sample menu item text", items.linelength_sample and items.linelength_sample.text, "Line length: this book (sample)")
+expect("sample menu item goes in the Typeset menu", items.linelength_sample and items.linelength_sample.sorting_hint, "typeset")
 local item_count = 0
 for _k in pairs(items) do item_count = item_count + 1 end
-expect("one menu item", item_count, 1)
+expect("two menu items", item_count, 2)
+expect("sample action registered", type(actions["linelength_sample"]), "table")
+expect("sample action event", actions["linelength_sample"] and actions["linelength_sample"].event, "LinelengthSample")
+expect("sample action title", actions["linelength_sample"] and actions["linelength_sample"].title,
+    "Line length: this book (sample)")
+expect("sample action is only for books that reflow", actions["linelength_sample"] and actions["linelength_sample"].rolling, true)
 
 -- 10b. nothing in the file manager (no document); a bare ui does not crash and still offers the action
 actions = {}
@@ -1114,6 +1121,155 @@ u16.fail_event = true
 local cancel_ok = pcall(c16.opts.on_control, "cancel")
 expect("cancel with a failing reader: no error escapes", cancel_ok, true)
 expect("cancel with a failing reader: it is logged", #warns, 1)
+
+local function tests_sample()
+    -- 12. a sample of pages: the page on screen first, the other pages drawn off screen, the reader put back.
+    local function sampleBook(opts)
+        opts = opts or {}
+        local lines = opts.lines or { ("w"):rep(60), ("x"):rep(55), ("y"):rep(50) }
+        local doc = fakeDoc(lines, { raises = opts.raises })
+        doc.pages = opts.pages or 100
+        doc.current = opts.current or 1
+        doc.gotos = {}
+        function doc:getPageCount() return self.pages end
+        function doc:getCurrentPage() return self.current end
+        function doc:gotoPage(page)
+            self.gotos[#self.gotos + 1] = page
+            self.current = page
+        end
+        if opts.no_page_count then
+            doc.getPageCount = nil
+        end
+        local ui = { menu = newMenu(), highlight = newHighlight(), document = doc, rolling = {},
+            view = { paintTo = function(_self, bb)
+            bb.painted = (bb.painted or 0) + 1
+            doc.drawn = (doc.drawn or 0) + 1
+        end } }
+        -- the reader answers a page turn the way ReaderRolling does: the document moves, the page is remembered
+        function ui:handleEvent(ev)
+            if ev.name ~= "GotoPage" then return end
+            doc.tried = doc.tried or {}
+            doc.tried[#doc.tried + 1] = ev.args[1]
+            if opts.goto_raises then error("goto boom") end
+            doc:gotoPage(ev.args[1])
+            return true
+        end
+        return makePlugin({ document = {}, ui = ui }), ui, doc
+    end
+
+    local function pageTurns(doc)
+        local t = {}
+        for i, page in ipairs(doc.gotos) do t[i] = tostring(page) end
+        return table.concat(t, ",")
+    end
+
+    -- 12a. 6 first, 6 middle and 6 last pages; the page on screen is measured first and not visited again
+    reset()
+    buffers.created, draws.n, repaints.n = {}, 0, 0
+    local sp, _sui, sdoc = sampleBook({ pages = 100, current = 3 })
+    local sample = sp:measureSample()
+    expect("sample: measured", type(sample), "table")
+    expect("sample: total pages", sample and sample.total, 100)
+    expect("sample: the page on screen is measured first", sample and sample.pages[1].page, 3)
+    expect("sample: 7 pages read (the page on screen, then six from the middle)", sample and #sample.values, 7)
+    expect("sample: only the six other pages are drawn", sdoc.drawn, 6)
+    expect("sample: one buffer", #buffers.created, 1)
+    expect("sample: the buffer is given back", buffers.created[1] and buffers.created[1].freed, 1)
+    expect("sample: nothing is refreshed on the screen", repaints.n, 0)
+    expect("sample: each page counts its longest line", sample and sample.values[1], 60)
+    expect("sample: median", sample and sample.median, 60)
+    expect("sample: min", sample and sample.min, 60)
+    expect("sample: max", sample and sample.max, 60)
+    expect("sample: 6 page turns and the way back", #sdoc.gotos, 7)
+    expect("sample: back on the page it started from", sdoc.current, 3)
+    expect("sample: the first sample page", sdoc.gotos[1], 48)
+    expect("sample: the last sample page", sdoc.gotos[#sdoc.gotos - 1], 53)
+
+    -- 12b. the page on screen outside the sample is measured too, and no page turn goes to a page twice
+    reset()
+    buffers.created, draws.n, repaints.n = {}, 0, 0
+    local sp2, _ui2, sdoc2 = sampleBook({ pages = 100, current = 20 })
+    local sample2 = sp2:measureSample()
+    expect("sample: 7 pages read when the current page is outside the sample", sample2 and #sample2.values, 7)
+    expect("sample: the current page comes first", sample2 and sample2.pages[1].page, 20)
+    expect("sample: back where it started", sdoc2.current, 20)
+    expect("sample: one page turn per sampled page, and the way back", #sdoc2.gotos, 7)
+
+    -- 12c. a book shorter than the sample: every page once, no page turn out of the book
+    reset()
+    buffers.created, draws.n, repaints.n = {}, 0, 0
+    local sp3, _ui3, sdoc3 = sampleBook({ pages = 4, current = 1 })
+    local sample3 = sp3:measureSample()
+    expect("short book: every page once", sample3 and #sample3.values, 4)
+    expect("short book: four page turns (pages 2 to 4 and back)", #sdoc3.gotos, 4)
+    expect("short book: the pages visited", pageTurns(sdoc3), "2,3,4,1")
+
+    -- 12d. configured counts: 2 first, 2 middle, 2 last
+    reset()
+    buffers.created, draws.n, repaints.n = {}, 0, 0
+    local sp4, _ui4, sdoc4 = sampleBook({ pages = 50, current = 1 })
+    local sample4 = sp4:measureSample({ first = 2, middle = 2, last = 2 })
+    expect("configured counts: 6 pages", sample4 and #sample4.values, 6)
+    expect("configured counts: the pages asked for", pageTurns(sdoc4), "2,25,26,49,50,1")
+
+    -- 12e. a book that cannot be sampled: a reason, no crash
+    reset()
+    local sp5 = sampleBook({ pages = 0 })
+    local nothing5, reason5 = sp5:measureSample()
+    expect("no pages: nothing measured", nothing5, nil)
+    expect("no pages: reason", reason5, "empty")
+    reset()
+    local sp6 = sampleBook({ pages = 100, no_page_count = true })
+    local nothing6, reason6 = sp6:measureSample()
+    expect("no page count: nothing measured", nothing6, nil)
+    expect("no page count: unsupported", reason6, "unsupported")
+    reset()
+    local sp6b = makePlugin({ document = {}, ui = { menu = newMenu(), highlight = newHighlight(),
+        document = fakeDoc({ L1 }) } })
+    local nothing6b, reason6b = sp6b:measureSample()
+    expect("no reader to turn pages: nothing measured", nothing6b, nil)
+    expect("no reader to turn pages: unsupported", reason6b, "unsupported")
+
+    -- 12f. the reader fails going to a page: no error escapes, the buffer is given back
+    reset()
+    buffers.created, draws.n, repaints.n = {}, 0, 0
+    local sp7, _ui7 = sampleBook({ pages = 100, current = 1, goto_raises = true })
+    local ok7, maybe7, reason7 = pcall(function() return sp7:measureSample() end)
+    expect("goto fails: no error escapes the caller", ok7, true)
+    expect("goto fails: nothing measured", maybe7, nil)
+    expect("goto fails: the reason is logged as an error", reason7, "error")
+    expect("goto fails: the buffer is still given back", buffers.created[1] and buffers.created[1].freed, 1)
+    expect("goto fails: the reader is still asked to go back to its page",
+        _ui7.document.tried[#_ui7.document.tried], 1)
+
+    -- 12g. no page can be read: nothing measured, and the buffer is given back
+    reset()
+    buffers.created, draws.n, repaints.n = {}, 0, 0
+    local sp8 = sampleBook({ pages = 100, current = 1, raises = true })
+    local sample8, reason8 = sp8:measureSample()
+    expect("unreadable pages: nothing measured", sample8, nil)
+    expect("unreadable pages: reason", reason8, "empty")
+    expect("unreadable pages: the buffer is given back", buffers.created[1] and buffers.created[1].freed, 1)
+
+    -- 12h. no off-screen buffer: nothing measured, and no page is ever painted on the e-ink panel
+    reset()
+    buffers.created, draws.n, repaints.n, buffers.raises = {}, 0, 0, true
+    local sp9, _ui9, sdoc9 = sampleBook({ pages = 100, current = 1 })
+    local sample9, reason9 = sp9:measureSample()
+    buffers.raises = false
+    expect("no buffer: nothing measured", sample9, nil)
+    expect("no buffer: reason", reason9, "no_buffer")
+    expect("no buffer: not one refresh of the screen", repaints.n, 0)
+    expect("no buffer: the reader was not moved", #sdoc9.gotos, 0)
+
+    -- 12i. the action and its handler reach the sample
+    reset()
+    local sp10 = sampleBook({ pages = 100, current = 1 })
+    expect("sample action event", actions["linelength_sample"] and actions["linelength_sample"].event, "LinelengthSample")
+    expect("sample event handler exists", type(sp10.onLinelengthSample), "function")
+end
+
+tests_sample()
 
 if failures > 0 then
     error(failures .. " main test(s) failed")

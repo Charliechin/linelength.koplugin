@@ -21,6 +21,7 @@ local Layout = require("linelength/layout")
 local PageLines = require("linelength/pagelines")
 local Rating = require("linelength/rating")
 local Report = require("linelength/report")
+local Sample = require("linelength/sample")
 
 local LineLength = WidgetContainer:extend{
     name = "linelength",
@@ -153,7 +154,8 @@ local SETTLE_TRIES = 3
 -- page back where it was. So it is given a buffer nobody sees: no refresh is asked of the e-ink panel (on a colour
 -- Kobo each whole-screen refresh is a visible blink). Returns the function that draws and the one that gives the buffer
 -- back. If there is no reader view or no buffer to be had, drawing falls back to a draw on the screen.
-local function newDrawer(ui)
+-- nil instead of a draw on the screen when `off_screen_only` is set and no off-screen buffer can be had.
+local function newDrawer(ui, off_screen_only)
     local view = ui and ui.view
     if view and view.paintTo then
         local screen = Device.screen
@@ -177,6 +179,9 @@ local function newDrawer(ui)
             return draw, release
         end
         logger.warn("linelength: could not get a buffer to draw the page off screen, drawing it on the screen:", buffer)
+    end
+    if off_screen_only then
+        return nil
     end
     return function() UIManager:forceRePaint() end, function() end
 end
@@ -212,6 +217,104 @@ function LineLength:measureSettled()
         error(err, 0)
     end
     return report, reason
+end
+
+-- Pages sampled when the caller does not say: 6 from the start, 6 from the middle, 6 from the end.
+local function sampleCounts(counts)
+    counts = counts or {}
+    return counts.first or Sample.DEFAULT_FIRST,
+        counts.middle or Sample.DEFAULT_MIDDLE,
+        counts.last or Sample.DEFAULT_LAST
+end
+
+--- Measures the longest line of each page of a sample of the book, without showing those pages.
+-- The page on screen is measured first, because it is already laid out and it is the page the reader is
+-- looking at. The other pages are reached with a page turn and drawn into a buffer nobody sees (see
+-- newDrawer), then the reader is put back where it was. Nothing is refreshed: KOReader marks the view as
+-- not drawn when the page changes and leaves the e-ink panel alone until the next UIManager cycle, so a
+-- whole sample is walked through without a single blink.
+-- Returns nil and a reason when the book cannot be sampled; otherwise a table with `pages` (page number
+-- and characters of each page that could be read), `values` (those character counts), `median`, `min`,
+-- `max` and `total` (the number of pages in the book).
+function LineLength:measureSample(counts)
+    local ui = self.ui
+    local doc = ui and ui.document
+    if not (doc and doc.getPageCount and ui.handleEvent) then
+        return nil, "unsupported"
+    end
+    local ok_count, total = pcall(doc.getPageCount, doc)
+    if not ok_count or type(total) ~= "number" or total < 1 then
+        return nil, "empty"
+    end
+    local first, middle, last = sampleCounts(counts)
+    local pages = Sample.pages(total, first, middle, last)
+    if #pages == 0 then
+        return nil, "empty"
+    end
+
+    local ok_start, current = pcall(doc.getCurrentPage, doc)
+    current = ok_start and tonumber(current) or nil
+    -- Without an off-screen buffer the walk would paint every page on the e-ink panel: do nothing instead.
+    local draw, release = newDrawer(self.ui, true)
+    if not draw then
+        return nil, "no_buffer"
+    end
+    -- A page turn through the reader, not straight on the document: the reader keeps the page it is on
+    -- and the view its state in step, so the page can be drawn and the reader put back afterwards.
+    local function turnTo(page)
+        ui:handleEvent(Event:new("GotoPage", page))
+    end
+    local measured, values = {}, {}
+    local ok_walk, err = pcall(function()
+        if current then
+            local report = pageReport(ui)
+            if report then
+                measured[#measured + 1] = { page = current, chars = report.chars }
+                values[#values + 1] = report.chars
+            end
+        end
+        for _i, page in ipairs(pages) do
+            if page ~= current then
+                turnTo(page)
+                draw()
+                local report = pageReport(ui)
+                if report then
+                    measured[#measured + 1] = { page = page, chars = report.chars }
+                    values[#values + 1] = report.chars
+                end
+            end
+        end
+    end)
+    -- The way back is its own step: a page that could not be read still leaves the reader where it was.
+    if current then
+        pcall(turnTo, current)
+    end
+    local ok_release, release_err = pcall(release)
+    if not ok_walk then
+        logger.warn("linelength: could not walk the pages of the sample:", err)
+        return nil, "error"
+    end
+    if not ok_release then
+        logger.warn("linelength: could not release the off-screen buffer:", release_err)
+    end
+    if #values == 0 then
+        return nil, "empty"
+    end
+    local min, max = Sample.range(values)
+    -- An even number of pages gives a median that ends in .5; a line is a whole number of characters, and
+    -- the rating floors, so the median is rounded to the nearest whole count once, here.
+    local median = Sample.median(values)
+    if median then
+        median = math.floor(median + 0.5)
+    end
+    return {
+        pages = measured,
+        values = values,
+        median = median,
+        min = min,
+        max = max,
+        total = total,
+    }
 end
 
 -- The width of the screen in KOReader's "unscaled" units, the ones the margins and the font size are given in.
@@ -366,6 +469,49 @@ function LineLength:showPage()
     })
 end
 
+-- The verdict is the one of the median line, not of any single page: dialogue and headings vary.
+local function sampleText(sample)
+    local tier = Rating.forChars(sample.median)
+    local lines = {
+        T(_("Median line: %1 chars - %2"), n(sample.median), LABELS[tier.id]),
+        T(_("Pages measured: %1 of %2"), n(#sample.values), n(sample.total)),
+    }
+    if sample.min and sample.max then
+        lines[#lines + 1] = T(_("Shortest and longest: %1 to %2"), n(sample.min), n(sample.max))
+    end
+    return table.concat(lines, "\n")
+end
+
+-- Measures a sample of the book's pages and shows the result. The book is laid out again on every page
+-- that is measured, so this takes a few seconds on a device and the reader sees a "measuring" message.
+function LineLength:showSample(counts)
+    UIManager:show(InfoMessage:new{ text = _("Measuring pages..."), timeout = 1 })
+    local ok, sample, reason = pcall(function() return (self:measureSample(counts)) end)
+    if not ok then
+        logger.warn("linelength: could not measure a sample of pages:", sample)
+        UIManager:show(InfoMessage:new{ text = _("Could not measure the pages of this book.") })
+        return
+    end
+    if not sample then
+        local text
+        if reason == "unsupported" then
+            text = _("This only works in books that reflow, like EPUB.")
+        elseif reason == "no_buffer" then
+            text = _("Not enough memory to measure a sample of pages.")
+        else
+            text = _("There is no text on these pages.")
+        end
+        UIManager:show(InfoMessage:new{ text = text })
+        return
+    end
+    UIManager:show(InfoMessage:new{ text = sampleText(sample) })
+end
+
+function LineLength:onLinelengthSample()
+    self:showSample()
+    return true
+end
+
 -- The page measurement as an action, so it can be put on a gesture, a quick action or a profile.
 function LineLength:onDispatcherRegisterActions()
     -- The id "wordcount_page" is the plugin's old name. KOReader stores it in gesture and profile settings, so it
@@ -374,6 +520,10 @@ function LineLength:onDispatcherRegisterActions()
     -- in a PDF or in the file manager the action is not listed and does not run.
     Dispatcher:registerAction("wordcount_page", {
         category = "none", event = "LinelengthPage", title = _("Line length: this page"), rolling = true,
+    })
+    Dispatcher:registerAction("linelength_sample", {
+        category = "none", event = "LinelengthSample", title = _("Line length: this book (sample)"),
+        rolling = true,
     })
 end
 
@@ -387,6 +537,11 @@ function LineLength:addToMainMenu(menu_items)
         text = _("Line length: this page"),
         sorting_hint = "typeset",
         callback = function() self:showPage() end,
+    }
+    menu_items.linelength_sample = {
+        text = _("Line length: this book (sample)"),
+        sorting_hint = "typeset",
+        callback = function() self:showSample() end,
     }
 end
 
