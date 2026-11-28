@@ -370,17 +370,18 @@ local items = {}
 plugin:addToMainMenu(items)
 expect("menu item text", items.linelength_page and items.linelength_page.text, "Line length: this page")
 expect("menu item goes in the Typeset menu", items.linelength_page and items.linelength_page.sorting_hint, "typeset")
-expect("sample menu item text", items.linelength_sample and items.linelength_sample.text, "Line length: this book (sample)")
-expect("sample menu item goes in the Typeset menu", items.linelength_sample and items.linelength_sample.sorting_hint, "typeset")
 local item_count = 0
 for _k in pairs(items) do item_count = item_count + 1 end
-expect("five menu items", item_count, 5)
-expect("the tune menu item", items.linelength_tune and items.linelength_tune.text, "Line length: tune this book")
+expect("three menu items", item_count, 3)
+expect("no sample in the menu: it is an action only", items.linelength_sample, nil)
+expect("the tune menu item", items.linelength_tune and items.linelength_tune.text, "Line length: this book")
 expect("the tune action is registered", type(actions["linelength_tune"]), "table")
 expect("the tune action event", actions["linelength_tune"] and actions["linelength_tune"].event, "LinelengthTune")
-expect("the settings menu item", items.linelength_settings and items.linelength_settings.text, "Line length: tuning settings")
+expect("the tune action title", actions["linelength_tune"] and actions["linelength_tune"].title, "Line length: this book")
+expect("the settings menu item", items.linelength_settings and items.linelength_settings.text, "Line length: settings")
 expect("the settings menu item goes in the Typeset menu", items.linelength_settings and items.linelength_settings.sorting_hint, "typeset")
 expect("the settings menu has a sub menu", type(items.linelength_settings and items.linelength_settings.sub_item_table_func), "function")
+expect("the switch is in the settings, not in the menu", items.linelength_auto_tune, nil)
 expect("sample action registered", type(actions["linelength_sample"]), "table")
 expect("sample action event", actions["linelength_sample"] and actions["linelength_sample"].event, "LinelengthSample")
 expect("sample action title", actions["linelength_sample"] and actions["linelength_sample"].title,
@@ -1532,14 +1533,14 @@ local function tests_sample()
     tune_plugin:tuneNow()
     expect("the tune says when it could not measure the book", shown[#shown].text, "Could not tune this book.")
 
-    -- The settings menu: a switch and the numbers, each with a step of one.
+    -- The settings menu: the switch, and the numbers, each with a step of one.
     local menu = auto_plugin:settingsMenu()
-    expect("the settings menu has exactly four entries", #menu, 4)
+    expect("the settings menu has exactly five entries", #menu, 5)
     local found_switch, found_numbers = false, 0
     for _i, item in ipairs(menu) do
         if item.text_func then
             local text = item.text_func()
-            if type(text) == "string" and text:find("Auto%-tune") then
+            if type(text) == "string" and text:find("auto%-tune") then
                 found_switch = true
             end
         end
@@ -1547,17 +1548,21 @@ local function tests_sample()
             found_numbers = found_numbers + 1
         end
     end
-    expect("the settings menu has no switch", found_switch, false)
-    expect("the settings menu has the numbers", found_numbers, 4)
+    expect("the settings menu holds the switch", found_switch, true)
+    expect("the settings menu holds the numbers", found_numbers, 4)
 
-    -- The switch is its own Typeset entry now: it flips the setting and keeps it.
-    local switch = items.linelength_auto_tune
-    expect("the switch has a menu entry", type(switch), "table")
+    -- The switch is the first entry, and it flips the setting and keeps it.
+    local switch = menu[1]
+    expect("the switch comes first", type(switch), "table")
+    G_reader_settings.data = {}
+    expect("the switch reads off to start", switch.text_func(), "Line length: auto-tune off")
     local before = settings_plugin:settings().enabled
     switch.callback()
     expect("the switch flips the setting", settings_plugin:settings().enabled, not before)
+    expect("the switch says it is on", switch.text_func(), "Line length: auto-tune on")
     switch.callback()
     expect("and flips it back", settings_plugin:settings().enabled, before)
+    expect("and reads off again", switch.text_func(), "Line length: auto-tune off")
 
     -- A number goes up and down by one.
     local margin_item = nil

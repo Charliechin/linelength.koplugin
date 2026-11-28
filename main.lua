@@ -4,6 +4,8 @@
 --    with and without spaces, words, and the ranges.
 --  * the whole page: "Line length: this page" in the Typeset menu (also an action you can put on a gesture)
 --    shows the longest lines on the page that is on screen, rated by the longest one.
+--  * a book by itself: "Line length: this book" moves the margins until the lines hold a good
+--    length, and can be set to run when a book opens at its first page.
 local Device = require("device")
 local Dispatcher = require("dispatcher")
 local Event = require("ui/event")
@@ -478,7 +480,7 @@ function LineLength:onDispatcherRegisterActions()
         rolling = true,
     })
     Dispatcher:registerAction("linelength_tune", {
-        category = "none", event = "LinelengthTune", title = _("Line length: tune this book"),
+        category = "none", event = "LinelengthTune", title = _("Line length: this book"),
         rolling = true,
     })
 end
@@ -488,8 +490,8 @@ function LineLength:onLinelengthPage()
     return true
 end
 
--- What the reader chose for the auto-tune: the switch, and how far the margins may go. These are the
--- only three, and they are kept the way KOReader keeps a plugin's settings, in the reader's own
+-- What the reader chose for the auto-tune: the switch, the band the lines are held to, and how far
+-- the margins may go. They are kept the way KOReader keeps a plugin's settings, in the reader's own
 -- settings file.
 function LineLength:settings()
     return {
@@ -511,13 +513,25 @@ function LineLength:saveSettings(settings)
 end
 
 
--- The settings of the auto-tune, as a menu: a switch, and the numbers that decide what it does.
+-- The settings of the auto-tune, as a menu: the switch, and the numbers that decide what it does.
 -- Each number is a step of 1, and the menu shows what it is set to now.
 function LineLength:settingsMenu()
     local settings = self:settings()
     local function save()
         self:saveSettings(settings)
     end
+    -- The switch stays open on its own menu: it is one of the settings, not a way out of them.
+    local switch = {
+        text_func = function()
+            return settings.enabled and _("Line length: auto-tune on")
+                or _("Line length: auto-tune off")
+        end,
+        keep_menu_open = true,
+        callback = function()
+            settings.enabled = not settings.enabled
+            save()
+        end,
+    }
     -- A number, with a step of one. The bounds a number is given here are its own. A number that is
     -- one end of a pair also gets the other end of the pair as a bound, so that the two can never
     -- cross: `other_above` says the other end of the pair is the upper one.
@@ -559,6 +573,7 @@ function LineLength:settingsMenu()
         }
     end
     return {
+        switch,
         number(_("Shortest line"), "band_min", 1, 30, 80, "band_max", true),
         number(_("Longest line"), "band_max", 1, 30, 80, "band_min", false),
         number(_("Smallest margin"), "margin_min", 1, 0, 140, "margin_max", true),
@@ -572,31 +587,13 @@ function LineLength:addToMainMenu(menu_items)
         sorting_hint = "typeset",
         callback = function() self:showPage() end,
     }
-    menu_items.linelength_sample = {
-        text = _("Line length: this book (sample)"),
-        sorting_hint = "typeset",
-        callback = function() self:showSample() end,
-    }
     menu_items.linelength_tune = {
-        text = _("Line length: tune this book"),
+        text = _("Line length: this book"),
         sorting_hint = "typeset",
         callback = function() self:tuneNow() end,
     }
-    menu_items.linelength_auto_tune = {
-        text_func = function()
-            local settings = self:settings()
-            return settings.enabled and _("Line length: auto-tune on a book's first page: on")
-                or _("Line length: auto-tune on a book's first page: off")
-        end,
-        sorting_hint = "typeset",
-        callback = function()
-            local settings = self:settings()
-            settings.enabled = not settings.enabled
-            self:saveSettings(settings)
-        end,
-    }
     menu_items.linelength_settings = {
-        text = _("Line length: tuning settings"),
+        text = _("Line length: settings"),
         sorting_hint = "typeset",
         sub_item_table_func = function()
             return self:settingsMenu()
