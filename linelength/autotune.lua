@@ -19,13 +19,17 @@ AutoTune.MARGIN_MAX = 50
 AutoTune.MARGIN_FLOOR = 0
 AutoTune.MARGIN_CEILING = 200
 
+-- The band the reader can move, held to the range the menu's steppers offer.
+AutoTune.BAND_FLOOR = 30
+AutoTune.BAND_CEILING = 80
+
 -- How many characters the line length may change in one step.
 AutoTune.MAX_CHARS_PER_STEP = 6
 
--- Where the line length should land: a band of good lengths, and the one to aim at inside it.
+-- Where the line length should land: the band of good lengths, which the reader can widen or narrow,
+-- and the middle of it, which the step aims at.
 AutoTune.BAND_MIN = 56
 AutoTune.BAND_MAX = 60
-AutoTune.TARGET = 58
 
 -- How many re-renders the tune may take.
 AutoTune.MAX_STEPS = 6
@@ -43,15 +47,19 @@ end
 -- The limits with the defaults filled in for whatever was left out.
 local function resolved(limits)
     limits = limits or {}
-    return {
+    local resolved = {
         band_min = limits.band_min or AutoTune.BAND_MIN,
         band_max = limits.band_max or AutoTune.BAND_MAX,
-        target = tonumber(limits.target) or AutoTune.TARGET,
+        target = limits.target,
         margin_min = limits.margin_min or AutoTune.MARGIN_MIN,
         margin_max = limits.margin_max or AutoTune.MARGIN_MAX,
         max_chars_per_step = limits.max_chars_per_step or AutoTune.MAX_CHARS_PER_STEP,
         max_steps = limits.max_steps or AutoTune.MAX_STEPS,
     }
+    -- The step aims at the middle of the band: the band is what the reader sets, and the length
+    -- to aim at inside it follows.
+    resolved.target = math.floor((resolved.band_min + resolved.band_max) / 2 + 0.5)
+    return resolved
 end
 
 --- The limits of the tune: its own band, target and step, and the two margins the reader chose, held
@@ -61,13 +69,18 @@ end
 function AutoTune.limits(settings)
     settings = settings or {}
     local limits = resolved({
+        band_min = within(settings.band_min, nil, AutoTune.BAND_FLOOR, AutoTune.BAND_CEILING),
+        band_max = within(settings.band_max, nil, AutoTune.BAND_FLOOR, AutoTune.BAND_CEILING),
         margin_min = within(settings.margin_min, nil, AutoTune.MARGIN_FLOOR, AutoTune.MARGIN_CEILING),
         margin_max = within(settings.margin_max, nil, AutoTune.MARGIN_FLOOR, AutoTune.MARGIN_CEILING),
     })
+    if limits.band_min > limits.band_max then
+        limits.band_min, limits.band_max = limits.band_max, limits.band_min
+    end
     if limits.margin_min > limits.margin_max then
         limits.margin_min, limits.margin_max = limits.margin_max, limits.margin_min
     end
-    limits.target = math.max(limits.band_min, math.min(limits.band_max, limits.target))
+    limits.target = math.floor((limits.band_min + limits.band_max) / 2 + 0.5)
     return limits
 end
 
