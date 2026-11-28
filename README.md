@@ -56,6 +56,39 @@ good start, not a guarantee. It works in books that reflow (EPUB, FB2 and the li
 
 Thanks to the reddit user [Zanzel_Melancthones](https://www.reddit.com/user/Zanzel_Melancthones) for the suggestion to implement it this way.
 
+## Tuning a book by itself
+
+Three more entries in the Typeset menu:
+
+- **Line length: this book (sample)** measures the longest line of a few pages of the book and
+  reports the median, the shortest and the longest. The pages are read off screen, so the e-ink
+  panel does not move and the reader keeps its place.
+- **Line length: tune this book** moves the margins of the book until the lines hold the length the
+  auto-tune aims for, and says what came of it.
+- **Line length: settings** holds what the reader chooses for the tuning, below.
+
+The sample and the tune are also actions, so they can be put on a gesture.
+
+| Setting                     | What it means                                     | Default |
+|:----------------------------|:--------------------------------------------------|--------:|
+| Auto-tune when a book opens | tune the book when it is opened at its first page | off     |
+| Smallest margin             | how narrow the margins may go                     | 10      |
+| Biggest margin              | how wide the margins may go                       | 50      |
+
+The size of the text is never touched: it is the reader's own, and the margins are what the length
+of a line is made of. The top and bottom margins are left alone too: they change how many lines fit
+on a page, not how many characters a line holds.
+
+The rest of the tuning is the auto-tune's own: the band of line lengths it aims at (56 to 60
+characters), the length it aims for inside the band (58 characters), the size of a step (6
+characters) and the number of steps at most (6). The pages that are measured are the auto-tune's as
+well: none at the start, six from the middle, none at the end. They live in the plugin, not in the
+settings.
+
+The margins are saved with the book, the way KOReader saves the margins a reader sets by hand, and
+the book is tuned every time it is opened at its first page. A book that is already within the band
+keeps the margins it has.
+
 ## What the ranges are
 
 A character is a Unicode character of the line, including spaces and punctuation (`é` is one; invisible characters

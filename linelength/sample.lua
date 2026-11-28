@@ -50,10 +50,15 @@ function Sample.pages(page_count, first, middle, last)
             end
         end
     end
-    add(1, first)
-    -- Centred on the book: 100 pages and 6 wanted gives pages 48 to 53.
-    add(math.floor((page_count - middle) / 2) + 1, middle)
-    add(page_count - last + 1, last)
+    if page_count < first + middle + last then
+        -- The counts do not fit the book: the segments would leave gaps, so every page is measured.
+        add(1, page_count)
+    else
+        add(1, first)
+        -- Centred on the book: 100 pages and 6 wanted gives pages 48 to 53.
+        add(math.floor((page_count - middle) / 2) + 1, middle)
+        add(page_count - last + 1, last)
+    end
     table.sort(out)
     return out
 end

@@ -1,4 +1,3 @@
--- Wiring test for main.lua with KOReader stubbed out. It models source, not hardware.
 package.path = "./?.lua;" .. package.path
 
 -- ---- stubs --------------------------------------------------------------------------------
@@ -7,6 +6,16 @@ local color_state = { on = true } -- true, false, or "error" (isColorEnabled rai
 local screen_state = { raises = false, scale_raises = false } -- raises: asking for the screen size raises
 local details_opts = {}           -- what the card was asked to show
 local actions = {}                -- Dispatcher actions registered
+
+-- KOReader keeps a plugin's settings in the reader's own settings file, reached through this global.
+-- A table of key and value stands in for it here.
+G_reader_settings = {
+    data = {},
+    readSetting = function(self, key) return self.data[key] end,
+    isTrue = function(self, key) return self.data[key] == true end,
+    saveSetting = function(self, key, value) self.data[key] = value end,
+    flush = function() end,
+}
 
 local function extend(base, t)
     t = t or {}
@@ -34,6 +43,9 @@ local repaints = { n = 0, hook = nil }
 package.preload["ui/uimanager"] = function()
     return {
         show = function(_self, w) shown[#shown + 1] = w end,
+        -- The message the reader is shown waits for the next tick, so that it is on the screen
+        -- before the work starts. Here the tick comes right away.
+        tickAfterNext = function(_self, fn) fn() end,
         forceRePaint = function()
             repaints.n = repaints.n + 1
             if repaints.hook then repaints.hook() end
@@ -283,12 +295,23 @@ expect("Search stays where it was", rows[5][2], "12_search")
 local function fakeDoc(line_texts, opts)
     opts = opts or {}
     local NODE = "/b/p[1]/text()[1]"
+    -- The lines of a page depend on the page: a test that measures the wrong page is caught.
+    local page = 1
     local lines, offset = {}, 0
-    for i, s in ipairs(line_texts) do
-        lines[i] = { s = s, from = offset, to = offset + #s, y = 71 + (i - 1) * 64 }
-        offset = offset + #s + 1
+    local function layout()
+        lines, offset = {}, 0
+        for i, text in ipairs(line_texts) do
+            local shown = text
+            if opts.per_page then
+                shown = string.rep(text:sub(1, 1), opts.per_page(page) or #text)
+            end
+            lines[i] = { s = shown, from = offset, to = offset + #shown, y = 71 + (i - 1) * 64 }
+            offset = offset + #shown + 1
+        end
     end
+    layout()
     local d = {}
+    function d:setPage(p) page = p; layout() end
     function d:getTextFromPositions(p0, _p1)
         if opts.raises then error("engine boom") end
         if p0.y == 0 then
@@ -351,7 +374,13 @@ expect("sample menu item text", items.linelength_sample and items.linelength_sam
 expect("sample menu item goes in the Typeset menu", items.linelength_sample and items.linelength_sample.sorting_hint, "typeset")
 local item_count = 0
 for _k in pairs(items) do item_count = item_count + 1 end
-expect("two menu items", item_count, 2)
+expect("four menu items", item_count, 4)
+expect("the tune menu item", items.linelength_tune and items.linelength_tune.text, "Line length: tune this book")
+expect("the tune action is registered", type(actions["linelength_tune"]), "table")
+expect("the tune action event", actions["linelength_tune"] and actions["linelength_tune"].event, "LinelengthTune")
+expect("the settings menu item", items.linelength_settings and items.linelength_settings.text, "Line length: settings")
+expect("the settings menu item goes in the Typeset menu", items.linelength_settings and items.linelength_settings.sorting_hint, "typeset")
+expect("the settings menu has a sub menu", type(items.linelength_settings and items.linelength_settings.sub_item_table_func), "function")
 expect("sample action registered", type(actions["linelength_sample"]), "table")
 expect("sample action event", actions["linelength_sample"] and actions["linelength_sample"].event, "LinelengthSample")
 expect("sample action title", actions["linelength_sample"] and actions["linelength_sample"].title,
@@ -1122,12 +1151,104 @@ local cancel_ok = pcall(c16.opts.on_control, "cancel")
 expect("cancel with a failing reader: no error escapes", cancel_ok, true)
 expect("cancel with a failing reader: it is logged", #warns, 1)
 
+local function tests_autotune()
+    local AutoTune = require("linelength/autotune")
+    -- The auto-tune loop, run against a book that is simulated: the counts of the pages, the layout,
+    -- and the number of times the layout was changed. What the loop does with them is the plugin's.
+    local function tuneBook(opts)
+        opts = opts or {}
+        local tuned = LineLength:new{ document = {}, ui = { menu = newMenu(), highlight = newHighlight() } }
+        tuned:init()
+        local margins = opts.margins or { 40, 40 }
+        local measured = opts.measure
+        local applied = {}
+        tuned.currentLayout = function() return { margins = { margins[1], margins[2] }, size = 22 } end
+        -- The layout the book really has follows what was applied to it, or the measurements would
+        -- always be the ones of the first layout.
+        tuned.applyLayout = function(_self, new_margins)
+            applied[#applied + 1] = new_margins
+            margins = { new_margins[1], new_margins[2] }
+        end
+        tuned.measureSample = function()
+            local value = measured(#applied, margins)
+            if value == nil then return nil, "error" end
+            return { median = value, values = { value }, min = value, max = value, total = 100 }
+        end
+        local settings = {
+            band_min = 56, band_max = 60, target = 58,
+            margin_min = 20, margin_max = 50, max_chars_per_step = 6,
+        }
+        for key, value in pairs(opts.settings or {}) do settings[key] = value end
+        return tuned:autoTune(settings), applied
+    end
+
+    -- The book starts at a margin outside the bounds: both margins come back inside them.
+    local result, applied = tuneBook({
+        margins = { 30, 80 },
+        measure = function() return 58 end,
+    })
+    expect("an uneven layout out of the bounds is pulled back in", #applied > 0, true)
+    expect("both margins are set", applied[1] and applied[1][1] == applied[1][2], true)
+    expect("and they stay inside the bounds", applied[1][1] >= 20 and applied[1][1] <= 50, true)
+    expect("the book is reported as tuned", result and result.chars ~= nil, true)
+
+    -- The book cannot be measured again after the margins moved: no count is reported, and the
+    -- margins go back to where they were, so a failed tune leaves the book as the reader had it.
+    result, applied = tuneBook({
+        margins = { 40, 40 },
+        measure = function(measure_count)
+            if measure_count == 0 then return 75 end -- too long: the loop moves the margins
+            return nil -- and then the book cannot be measured any more
+        end,
+    })
+    expect("a book that cannot be measured again has no count", result and result.chars, nil)
+    expect("and nothing is reported as changed", result and result.changed, false)
+    expect("the margins are put back where they were", applied[#applied] and applied[#applied][1], 40)
+    expect("and back on both sides", applied[#applied] and applied[#applied][2], 40)
+
+    -- The book can be measured but the band is out of reach: the lines stay too long at every margin,
+    -- so the margins go as far as they can and stop at the bound, and the count that is left is the
+    -- one of that last layout, outside the band.
+    result, applied = tuneBook({
+        margins = { 30, 30 },
+        measure = function(_calls, current) return 120 - current[1] end,
+    })
+    expect("a book whose band is out of reach moves the margins", #applied > 0, true)
+    expect("it stops at the bound", applied[#applied][1], 50)
+    expect("a book whose band is out of reach still reports a count", type(result and result.chars), "number")
+    expect("and the count is outside the band", AutoTune.inBand(result.chars), false)
+    -- The count is the one of the last layout, not the one of the layout the book started with: the
+    -- two differ here, since the margins moved from 30 to 50.
+    expect("the count is the one of the last layout", result.chars, 120 - applied[#applied][1])
+
+    -- The band is the auto-tune's own, so a bag of settings cannot move it: a book that measures 58
+    -- is inside it even when the rest of the settings say otherwise.
+    result, applied = tuneBook({
+        margins = { 40, 40 },
+        settings = { band_min = 65, band_max = 70, target = 68 },
+        measure = function() return 58 end,
+    })
+    expect("the band is the auto-tune's own", #applied, 0)
+    expect("and its count is reported", result and result.chars, 58)
+    expect("nothing is reported as changed", result and result.changed, false)
+
+    -- The same book with the default band is out of it, so the margins move.
+    result, applied = tuneBook({
+        margins = { 40, 40 },
+        measure = function() return 68 end,
+    })
+    expect("the same book with the default band is tuned", #applied > 0, true)
+    expect("and it is reported as changed", result and result.changed, true)
+end
+
 local function tests_sample()
     -- 12. a sample of pages: the page on screen first, the other pages drawn off screen, the reader put back.
     local function sampleBook(opts)
         opts = opts or {}
+        -- A different length per line, and the lines of the page come from the document, so a
+        -- measurement of the wrong page is caught instead of passing on the same numbers.
         local lines = opts.lines or { ("w"):rep(60), ("x"):rep(55), ("y"):rep(50) }
-        local doc = fakeDoc(lines, { raises = opts.raises })
+        local doc = fakeDoc(lines, { raises = opts.raises, per_page = opts.per_page })
         doc.pages = opts.pages or 100
         doc.current = opts.current or 1
         doc.gotos = {}
@@ -1136,7 +1257,11 @@ local function tests_sample()
         function doc:gotoPage(page)
             self.gotos[#self.gotos + 1] = page
             self.current = page
+            -- The lines of the page are the lines of the page the reader is on now: a fixture that
+            -- kept the lines of the first page would measure the wrong page and pass on its numbers.
+            self:setPage(page)
         end
+        doc:setPage(doc.current)
         if opts.no_page_count then
             doc.getPageCount = nil
         end
@@ -1145,14 +1270,16 @@ local function tests_sample()
             bb.painted = (bb.painted or 0) + 1
             doc.drawn = (doc.drawn or 0) + 1
         end } }
-        -- the reader answers a page turn the way ReaderRolling does: the document moves, the page is remembered
+        -- the reader answers a page turn the way ReaderRolling does: the document moves and the page is
+        -- the one it is on, which is also the page the walk comes back to
         function ui:handleEvent(ev)
-            if ev.name ~= "GotoPage" then return end
             doc.tried = doc.tried or {}
-            doc.tried[#doc.tried + 1] = ev.args[1]
+            doc.tried[#doc.tried + 1] = ev.name .. ":" .. tostring(ev.args[1])
             if opts.goto_raises then error("goto boom") end
-            doc:gotoPage(ev.args[1])
-            return true
+            if ev.name == "GotoPage" then
+                doc:gotoPage(ev.args[1])
+                return true
+            end
         end
         return makePlugin({ document = {}, ui = ui }), ui, doc
     end
@@ -1170,8 +1297,11 @@ local function tests_sample()
     local sample = sp:measureSample()
     expect("sample: measured", type(sample), "table")
     expect("sample: total pages", sample and sample.total, 100)
-    expect("sample: the page on screen is measured first", sample and sample.pages[1].page, 3)
-    expect("sample: 7 pages read (the page on screen, then six from the middle)", sample and #sample.values, 7)
+    -- The reader is on page 3, which is not one of the six sampled pages of the middle: it is left
+    -- out, so that the median is the median of the sample and not of the sample and one more.
+    expect("sample: the first sampled page is in the middle of the book", sample and sample.pages[1].page, 48)
+    expect("sample: the sample is the six pages of the middle", #sample.values, 6)
+    expect("sample: 6 pages read", sample and #sample.values, 6)
     expect("sample: only the six other pages are drawn", sdoc.drawn, 6)
     expect("sample: one buffer", #buffers.created, 1)
     expect("sample: the buffer is given back", buffers.created[1] and buffers.created[1].freed, 1)
@@ -1190,8 +1320,8 @@ local function tests_sample()
     buffers.created, draws.n, repaints.n = {}, 0, 0
     local sp2, _ui2, sdoc2 = sampleBook({ pages = 100, current = 20 })
     local sample2 = sp2:measureSample()
-    expect("sample: 7 pages read when the current page is outside the sample", sample2 and #sample2.values, 7)
-    expect("sample: the current page comes first", sample2 and sample2.pages[1].page, 20)
+    expect("sample: the current page outside the sample is left out", sample2 and #sample2.values, 6)
+    expect("sample: the first sampled page is in the middle of the book", sample2 and sample2.pages[1].page, 48)
     expect("sample: back where it started", sdoc2.current, 20)
     expect("sample: one page turn per sampled page, and the way back", #sdoc2.gotos, 7)
 
@@ -1201,7 +1331,7 @@ local function tests_sample()
     local sp3, _ui3, sdoc3 = sampleBook({ pages = 4, current = 1 })
     local sample3 = sp3:measureSample()
     expect("short book: every page once", sample3 and #sample3.values, 4)
-    expect("short book: four page turns (pages 2 to 4 and back)", #sdoc3.gotos, 4)
+    expect("short book: three page turns (pages 2 to 4) and one way back", #sdoc3.gotos, 4)
     expect("short book: the pages visited", pageTurns(sdoc3), "2,3,4,1")
 
     -- 12d. configured counts: 2 first, 2 middle, 2 last
@@ -1230,8 +1360,15 @@ local function tests_sample()
     expect("no reader to turn pages: nothing measured", nothing6b, nil)
     expect("no reader to turn pages: unsupported", reason6b, "unsupported")
 
-    -- 12f. the reader fails going to a page: no error escapes, the buffer is given back
+    -- A document that cannot read text by position is not a book the plugin can walk at all.
     reset()
+    local sp6c, _ui6c, _sdoc6c = sampleBook({ pages = 100, current = 20 })
+    sp6c.ui.document.getTextFromPositions = nil
+    local nothing6c, reason6c = sp6c:measureSample()
+    expect("no text by position: nothing measured", nothing6c, nil)
+    expect("no text by position: unsupported", reason6c, "unsupported")
+
+    -- 12f. the reader fails going to a page: no error escapes, the buffer is given back
     buffers.created, draws.n, repaints.n = {}, 0, 0
     local sp7, _ui7 = sampleBook({ pages = 100, current = 1, goto_raises = true })
     local ok7, maybe7, reason7 = pcall(function() return sp7:measureSample() end)
@@ -1239,8 +1376,9 @@ local function tests_sample()
     expect("goto fails: nothing measured", maybe7, nil)
     expect("goto fails: the reason is logged as an error", reason7, "error")
     expect("goto fails: the buffer is still given back", buffers.created[1] and buffers.created[1].freed, 1)
-    expect("goto fails: the reader is still asked to go back to its page",
-        _ui7.document.tried[#_ui7.document.tried], 1)
+    -- The way back is attempted even when the walk failed: the reader is not left on a sampled page.
+    expect("goto fails: the reader is still sent back to its page",
+        _ui7.document.tried[#_ui7.document.tried], "GotoPage:1")
 
     -- 12g. no page can be read: nothing measured, and the buffer is given back
     reset()
@@ -1267,9 +1405,214 @@ local function tests_sample()
     local sp10 = sampleBook({ pages = 100, current = 1 })
     expect("sample action event", actions["linelength_sample"] and actions["linelength_sample"].event, "LinelengthSample")
     expect("sample event handler exists", type(sp10.onLinelengthSample), "function")
+    -- The handler has to do the work: a handler that does nothing would pass a type check.
+    local shown_count = 0
+    sp10.showSample = function() shown_count = shown_count + 1 end
+    sp10:onLinelengthSample()
+    expect("the sample handler measures the book", shown_count, 1)
+
+    -- 12j. a book whose lines differ from page to page: every page is measured on its own lines,
+    -- and the reader is put back on the page it started from.
+    reset()
+    local sp11, _ui11, sdoc11 = sampleBook({ pages = 100, current = 1,
+        per_page = function(page) return page end })
+    local sample11 = sp11:measureSample()
+    expect("per page: measured", type(sample11), "table")
+    expect("per page: the six pages of the middle", #sample11.values, 6)
+    -- Every page of the sample has lines of its own length, and the fixture makes that length the page
+    -- number itself: each count is the page it came from, not the page the walk started on.
+    local counts = {}
+    for _i, page in ipairs(sample11.pages) do
+        counts[#counts + 1] = page.chars
+        expect("per page: the page is measured on its own lines", page.chars, page.page)
+    end
+    table.sort(counts)
+    local all_different = true
+    for i = 2, #counts do
+        if counts[i] == counts[i - 1] then all_different = false end
+    end
+    expect("per page: every page counts its own lines", all_different, true)
+    expect("per page: back on the page it started from", sdoc11.current, 1)
+
+    -- 12k. the page on screen is one of the sampled pages: it is drawn and measured like the others,
+    -- so a layout that was changed a moment ago cannot leave the numbers of the old layout in the
+    -- sample, and the reader is still where it was.
+    reset()
+    buffers.created, draws.n, repaints.n = {}, 0, 0
+    local sp12, _ui12, sdoc12 = sampleBook({ pages = 100, current = 50 })
+    local sample12 = sp12:measureSample()
+    expect("current page sampled: measured", type(sample12), "table")
+    expect("current page sampled: the six pages of the middle", #sample12.values, 6)
+    expect("current page sampled: the page on screen is one of them", sample12.pages[1].page, 50)
+    expect("current page sampled: every sampled page is drawn", sdoc12.drawn, 6)
+    expect("current page sampled: back where it started", sdoc12.current, 50)
+    expect("current page sampled: nothing is refreshed on the screen", repaints.n, 0)
+
+    -- 13. the auto-tune: the settings, the switch, and the numbers in the menu.
+    G_reader_settings.data = {}
+    local settings_plugin = LineLength:new{ document = {}, ui = { menu = newMenu(), highlight = newHighlight() } }
+    settings_plugin:init()
+    local settings = settings_plugin:settings()
+    expect("the auto-tune is off by default", settings.enabled, false)
+    expect("the margins start at 10", settings.margin_min, 10)
+    expect("the margins end at 50", settings.margin_max, 50)
+
+
+    -- The auto-tune does nothing when the reader has not asked for it. The book is opened at its start,
+    -- which is the only place the tune runs.
+    local auto_doc = fakeDoc({ L1, L2, L3 })
+    auto_doc.current = 1
+    function auto_doc:getCurrentPage() return self.current end
+    local auto_plugin = LineLength:new{ document = {}, ui = { menu = newMenu(), highlight = newHighlight(),
+        document = auto_doc } }
+    auto_plugin:init()
+    local called, tuned_with = false, nil
+    auto_plugin.autoTune = function(_self, settings) called = true; tuned_with = settings end
+    G_reader_settings.data = {}
+    auto_plugin:onReaderReady()
+    expect("the auto-tune stays off when it is not asked for", called, false)
+    G_reader_settings.data = { linelength_auto_tune = true }
+    auto_plugin:onReaderReady()
+    expect("the auto-tune runs when it is asked for", called, true)
+    expect("and it is given the margins the reader chose", tuned_with and tuned_with.margin_min, 10)
+
+    -- The automatic tune is given the reader's margins and not the defaults: a book opened at its
+    -- start is tuned with the bounds the reader set.
+    G_reader_settings.data = { linelength_auto_tune = true, linelength_margin_min = 20, linelength_margin_max = 26 }
+    auto_plugin:onReaderReady()
+    expect("the automatic tune reads the margins from the reader", tuned_with and tuned_with.margin_min, 20)
+    expect("the automatic tune reads the margins from the reader", tuned_with and tuned_with.margin_max, 26)
+
+    -- It runs when the book is opened at its start, and nowhere else: a book picked up where it was
+    -- left keeps the layout the reader is reading it with.
+    local gate_doc = fakeDoc({ L1, L2, L3 })
+    gate_doc.current = 1
+    function gate_doc:getCurrentPage() return self.current end
+    local gate_plugin = LineLength:new{ document = {}, ui = { menu = newMenu(), highlight = newHighlight(),
+        document = gate_doc } }
+    gate_plugin:init()
+    local gate_called = false
+    gate_plugin.autoTune = function() gate_called = true end
+    gate_plugin:onReaderReady()
+    expect("a book opened at its start is tuned", gate_called, true)
+    gate_called = false
+    gate_doc.current = 2
+    gate_plugin:onReaderReady()
+    expect("a book opened anywhere else is left alone", gate_called, false)
+    G_reader_settings.data = {}
+
+    -- The action that tunes the book now says what came of it, and says so when it could not be done.
+    local tune_plugin = LineLength:new{ document = {}, ui = { menu = newMenu(), highlight = newHighlight() } }
+    tune_plugin:init()
+    shown = {}
+    tune_plugin.autoTune = function() return { steps = 1, chars = 58, changed = true, margin = 30 } end
+    tune_plugin:tuneNow()
+    expect("the tune says what it did", shown[#shown].text, "Tuned to 58 characters.")
+    shown = {}
+    tune_plugin.autoTune = function() return { steps = 0, chars = 58, changed = false, margin = 30 } end
+    tune_plugin:tuneNow()
+    expect("the tune says when there was nothing to change", shown[#shown].text,
+        "Already 58 characters, nothing to change.")
+    shown = {}
+    tune_plugin.autoTune = function() return nil end
+    tune_plugin:tuneNow()
+    expect("the tune says when it could not measure the book", shown[#shown].text, "Could not tune this book.")
+
+    -- The settings menu: a switch and the numbers, each with a step of one.
+    local menu = auto_plugin:settingsMenu()
+    expect("the settings menu has exactly three entries", #menu, 3)
+    local found_switch, found_numbers = false, 0
+    for _i, item in ipairs(menu) do
+        if item.text_func then
+            local text = item.text_func()
+            if type(text) == "string" and text:find("Auto%-tune") then
+                found_switch = true
+            end
+        end
+        if item.sub_item_table then
+            found_numbers = found_numbers + 1
+        end
+    end
+    expect("the settings menu has the switch", found_switch, true)
+    expect("the settings menu has the numbers", found_numbers, 2)
+
+    -- The switch flips the setting and keeps it.
+    local before = settings_plugin:settings().enabled
+    menu[1].callback()
+    expect("the switch flips the setting", settings_plugin:settings().enabled, not before)
+    menu[1].callback()
+    expect("and flips it back", settings_plugin:settings().enabled, before)
+
+    -- A number goes up and down by one.
+    local margin_item = nil
+    for _i, item in ipairs(menu) do
+        if item.sub_item_table then
+            local label = item.text_func()
+            if label:find("Biggest margin") then margin_item = item end
+        end
+    end
+    expect("the biggest margin is in the menu", margin_item ~= nil, true)
+    local value = settings_plugin:settings().margin_max
+    margin_item.sub_item_table[2].callback()
+    expect("a number goes up by one", settings_plugin:settings().margin_max, value + 1)
+    margin_item.sub_item_table[1].callback()
+    expect("and back down", settings_plugin:settings().margin_max, value)
+
+    -- The two ends of a pair never cross: the smallest margin cannot go past the biggest one.
+    -- The menu reads the settings when it is built, so it is built again for each case.
+    local function menuItem(label)
+        for _i, item in ipairs(auto_plugin:settingsMenu()) do
+            if item.sub_item_table and item.text_func():find(label) then return item end
+        end
+    end
+    -- The margins.
+    G_reader_settings.data = { linelength_margin_min = 50, linelength_margin_max = 50 }
+    local biggest = menuItem("Biggest margin")
+    expect("the biggest margin is in the menu", biggest ~= nil, true)
+    biggest.sub_item_table[1].callback()
+    expect("the biggest margin does not go below the smallest one", settings_plugin:settings().margin_max, 50)
+    expect("and the step that would do it is not offered", biggest.sub_item_table[1].enabled_func(), false)
+    G_reader_settings.data = { linelength_margin_min = 20, linelength_margin_max = 20 }
+    local smallest = menuItem("Smallest margin")
+    expect("the smallest margin is in the menu", smallest ~= nil, true)
+    smallest.sub_item_table[2].callback()
+    expect("the smallest margin does not go above the biggest one", settings_plugin:settings().margin_min, 20)
+    expect("and the step that would do it is not offered", smallest.sub_item_table[2].enabled_func(), false)
+    -- The settings are put back as they were.
+    G_reader_settings.data = {}
 end
 
+
+-- 14. a drawer that could not draw off screen says so on every call, so a caller that keeps its
+-- callback cannot end up painting on the panel it asked to stay off.
+local function tests_drawer()
+    local Measure = require("linelength/measure")
+    local repaints, drawn = 0, 0
+    local UIManagerStub = require("ui/uimanager")
+    local real_repaint = UIManagerStub.forceRePaint
+    UIManagerStub.forceRePaint = function() repaints = repaints + 1 end
+    local ui = { view = { paintTo = function() drawn = drawn + 1; error("paint boom") end } }
+
+    local draw, release = Measure.drawer(ui, true)
+    expect("a strict drawer refuses a page it cannot draw off screen", draw(), false)
+    expect("and it refuses again, rather than falling back to the screen", draw(), false)
+    expect("and nothing was repainted", repaints, 0)
+    expect("the page was attempted once and given up on", drawn, 1)
+    release()
+
+    repaints, drawn = 0, 0
+    local loose_draw, loose_release = Measure.drawer(ui, false)
+    expect("a drawer that may use the screen repaints instead", loose_draw(), true)
+    expect("and the page was attempted once before that", drawn, 1)
+    expect("the repaint was asked for", repaints, 1)
+    loose_release()
+
+    UIManagerStub.forceRePaint = real_repaint
+end
+
+tests_autotune()
 tests_sample()
+tests_drawer()
 
 if failures > 0 then
     error(failures .. " main test(s) failed")
