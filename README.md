@@ -56,6 +56,47 @@ good start, not a guarantee. It works in books that reflow (EPUB, FB2 and the li
 
 Thanks to the reddit user [Zanzel_Melancthones](https://www.reddit.com/user/Zanzel_Melancthones) for the suggestion to implement it this way.
 
+## Tuning a book by itself
+
+Two more entries in the Typeset menu:
+
+- **Line length: this book** moves the margins of the book until the lines hold the length the
+  auto-tune aims for, and says what came of it.
+- **Line length: settings** holds the switch of the automatic tune, the band of line lengths and the
+  bounds of the margins, under one entry.
+
+The tune and the sample are also actions, so they can be put on a gesture: *Line length: this book*
+tunes the book, and *Line length: this book (sample)* measures the longest line of a few pages and
+reports the median, the shortest and the longest. The pages are read off screen, so the e-ink panel
+does not move and the reader keeps its place. Automatic tuning is off until the reader turns it on,
+in the settings.
+
+| Setting                           | What it means                                         | Default |
+|:----------------------------------|:------------------------------------------------------|--------:|
+| Line length: auto-tune            | tunes a book every time it opens at its first page    |     off |
+| Shortest line                     | the low end of the band the tuning aims the lines at  |      56 |
+| Longest line                      | the high end of the band                              |      60 |
+| Smallest margin                   | how narrow the margins may go                         |      10 |
+| Biggest margin                    | how wide the margins may go                           |      50 |
+
+The size of the text is never touched: it is the reader's own, and the margins are what the length
+of a line is made of. The top and bottom margins are left alone too: they change how many lines fit
+on a page, not how many characters a line holds.
+
+The length the margins aim for is the middle of the band, and it follows the two bounds: set 56 and
+60 and the tune aims at 58; set 50 and 56 and it aims at 53. The size of a step (6 characters) and
+the number of steps at most (6) are the auto-tune's own. The pages that are measured are its own too:
+none at the start, six from the middle, none at the end. They live in the plugin, not in the
+settings.
+
+The margins are saved with the book, the way KOReader saves the margins a reader sets by hand, and
+the book is tuned every time it is opened at its first page. The automatic tune is the *Line length:
+this book* action, run at the moment the book opens: it measures the pages, moves the margins if
+the lines are outside the band, and says what it did, the way it does when the reader asks for it. A
+book that is already within the band, with both margins inside the bounds the reader set, keeps the
+margins it has, and says so. A margin outside those bounds is brought back inside them first, even
+when the lines already read well.
+
 ## What the ranges are
 
 A character is a Unicode character of the line, including spaces and punctuation (`é` is one; invisible characters
